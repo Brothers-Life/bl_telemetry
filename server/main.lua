@@ -7,6 +7,9 @@
     Convars (server.cfg) :
         set telemetry_url   "https://ingest-api.webgune.dev"
         set telemetry_token "<token>"
+    Facultatif :
+        set telemetry_society_sql "SELECT COALESCE(SUM(amount),0) AS total FROM management_funds"
+        set telemetry_live_ms 30000   -- relecture des tables banque / shops (0 = off)
 ]]
 
 local URL   = GetConvar('telemetry_url', '')
@@ -53,6 +56,94 @@ local function ident(src)
         return pd.citizenid, ('%s %s'):format(ci.firstname or '?', ci.lastname or '?')
     end
     return nil, GetPlayerName(src)
+end
+
+-- Hash d'arme -> nom lisible. Les hash arrivent signes ou non selon la source : on normalise.
+local function normHash(h)
+    h = tonumber(h)
+    if not h then return nil end
+    h = math.floor(h)
+    if h > 2147483647 then h = h - 4294967296 end
+    return h
+end
+
+local WEAPONS = {
+    -- corps a corps
+    'WEAPON_UNARMED', 'WEAPON_KNIFE', 'WEAPON_NIGHTSTICK', 'WEAPON_HAMMER', 'WEAPON_BAT', 'WEAPON_GOLFCLUB',
+    'WEAPON_CROWBAR', 'WEAPON_BOTTLE', 'WEAPON_DAGGER', 'WEAPON_HATCHET', 'WEAPON_KNUCKLE', 'WEAPON_MACHETE',
+    'WEAPON_SWITCHBLADE', 'WEAPON_WRENCH', 'WEAPON_BATTLEAXE', 'WEAPON_POOLCUE', 'WEAPON_STONE_HATCHET', 'WEAPON_FLASHLIGHT',
+    -- pistolets
+    'WEAPON_PISTOL', 'WEAPON_PISTOL_MK2', 'WEAPON_COMBATPISTOL', 'WEAPON_APPISTOL', 'WEAPON_STUNGUN', 'WEAPON_PISTOL50',
+    'WEAPON_SNSPISTOL', 'WEAPON_SNSPISTOL_MK2', 'WEAPON_HEAVYPISTOL', 'WEAPON_VINTAGEPISTOL', 'WEAPON_FLAREGUN',
+    'WEAPON_MARKSMANPISTOL', 'WEAPON_REVOLVER', 'WEAPON_REVOLVER_MK2', 'WEAPON_DOUBLEACTION', 'WEAPON_RAYPISTOL',
+    'WEAPON_CERAMICPISTOL', 'WEAPON_NAVYREVOLVER', 'WEAPON_GADGETPISTOL',
+    -- mitraillettes
+    'WEAPON_MICROSMG', 'WEAPON_SMG', 'WEAPON_SMG_MK2', 'WEAPON_ASSAULTSMG', 'WEAPON_COMBATPDW', 'WEAPON_MACHINEPISTOL',
+    'WEAPON_MINISMG', 'WEAPON_RAYCARBINE',
+    -- fusils a pompe
+    'WEAPON_PUMPSHOTGUN', 'WEAPON_PUMPSHOTGUN_MK2', 'WEAPON_SAWNOFFSHOTGUN', 'WEAPON_ASSAULTSHOTGUN', 'WEAPON_BULLPUPSHOTGUN',
+    'WEAPON_MUSKET', 'WEAPON_HEAVYSHOTGUN', 'WEAPON_DBSHOTGUN', 'WEAPON_AUTOSHOTGUN', 'WEAPON_COMBATSHOTGUN',
+    -- fusils d'assaut
+    'WEAPON_ASSAULTRIFLE', 'WEAPON_ASSAULTRIFLE_MK2', 'WEAPON_CARBINERIFLE', 'WEAPON_CARBINERIFLE_MK2', 'WEAPON_ADVANCEDRIFLE',
+    'WEAPON_SPECIALCARBINE', 'WEAPON_SPECIALCARBINE_MK2', 'WEAPON_BULLPUPRIFLE', 'WEAPON_BULLPUPRIFLE_MK2', 'WEAPON_COMPACTRIFLE',
+    'WEAPON_MILITARYRIFLE', 'WEAPON_HEAVYRIFLE', 'WEAPON_TACTICALRIFLE',
+    -- mitrailleuses / precision
+    'WEAPON_MG', 'WEAPON_COMBATMG', 'WEAPON_COMBATMG_MK2', 'WEAPON_GUSENBERG',
+    'WEAPON_SNIPERRIFLE', 'WEAPON_HEAVYSNIPER', 'WEAPON_HEAVYSNIPER_MK2', 'WEAPON_MARKSMANRIFLE', 'WEAPON_MARKSMANRIFLE_MK2',
+    'WEAPON_PRECISIONRIFLE',
+    -- lourdes / lancers
+    'WEAPON_RPG', 'WEAPON_GRENADELAUNCHER', 'WEAPON_MINIGUN', 'WEAPON_FIREWORK', 'WEAPON_RAILGUN', 'WEAPON_HOMINGLAUNCHER',
+    'WEAPON_COMPACTLAUNCHER', 'WEAPON_RAYMINIGUN', 'WEAPON_GRENADE', 'WEAPON_BZGAS', 'WEAPON_MOLOTOV', 'WEAPON_STICKYBOMB',
+    'WEAPON_PROXMINE', 'WEAPON_PIPEBOMB', 'WEAPON_SMOKEGRENADE', 'WEAPON_FLARE', 'WEAPON_PETROLCAN', 'WEAPON_FIREEXTINGUISHER',
+    -- causes environnementales
+    'WEAPON_FALL', 'WEAPON_DROWNING', 'WEAPON_DROWNING_IN_VEHICLE', 'WEAPON_RUN_OVER_BY_CAR', 'WEAPON_RAMMED_BY_CAR',
+    'WEAPON_EXPLOSION', 'WEAPON_FIRE', 'WEAPON_BLEEDING', 'WEAPON_EXHAUSTION', 'WEAPON_ELECTRIC_FENCE', 'WEAPON_BARBED_WIRE',
+    'WEAPON_ANIMAL', 'WEAPON_COUGAR', 'WEAPON_HIT_BY_WATER_CANNON', 'WEAPON_HELI_CRASH', 'VEHICLE_WEAPON_ROTORS',
+}
+local WEAPON_BY_HASH = {}
+for _, name in ipairs(WEAPONS) do WEAPON_BY_HASH[normHash(GetHashKey(name))] = name end
+
+local MELEE = {}
+for i = 2, 18 do MELEE[WEAPONS[i]] = true end
+local CAUSE_BY_WEAPON = {
+    WEAPON_UNARMED = 'poings', WEAPON_FALL = 'chute', WEAPON_DROWNING = 'noyade', WEAPON_DROWNING_IN_VEHICLE = 'noyade',
+    WEAPON_RUN_OVER_BY_CAR = 'vehicule', WEAPON_RAMMED_BY_CAR = 'vehicule', WEAPON_HELI_CRASH = 'vehicule', VEHICLE_WEAPON_ROTORS = 'vehicule',
+    WEAPON_EXPLOSION = 'explosion', WEAPON_GRENADE = 'explosion', WEAPON_STICKYBOMB = 'explosion', WEAPON_PROXMINE = 'explosion',
+    WEAPON_PIPEBOMB = 'explosion', WEAPON_RPG = 'explosion', WEAPON_GRENADELAUNCHER = 'explosion', WEAPON_HOMINGLAUNCHER = 'explosion',
+    WEAPON_COMPACTLAUNCHER = 'explosion', WEAPON_FIREWORK = 'explosion', WEAPON_RAILGUN = 'explosion',
+    WEAPON_FIRE = 'feu', WEAPON_MOLOTOV = 'feu', WEAPON_PETROLCAN = 'feu', WEAPON_FLAREGUN = 'feu',
+    WEAPON_BLEEDING = 'saignement', WEAPON_EXHAUSTION = 'epuisement', WEAPON_ELECTRIC_FENCE = 'electrocution',
+    WEAPON_STUNGUN = 'electrocution', WEAPON_BARBED_WIRE = 'barbeles', WEAPON_ANIMAL = 'animal', WEAPON_COUGAR = 'animal',
+    WEAPON_BZGAS = 'gaz', WEAPON_SMOKEGRENADE = 'gaz', WEAPON_HIT_BY_WATER_CANNON = 'canon a eau',
+}
+
+-- Renvoie nom d'arme + categorie de cause a partir d'un hash.
+local function describeWeapon(hash)
+    hash = normHash(hash)
+    if not hash or hash == 0 then return nil, 'inconnue' end
+    local name = WEAPON_BY_HASH[hash]
+    if not name then return tostring(hash), 'inconnue' end
+    return name, CAUSE_BY_WEAPON[name] or (MELEE[name] and 'arme blanche') or 'balle'
+end
+
+-- Position et cause cote serveur (OneSync) : plus fiable que les donnees envoyees par le client.
+local function deathInfo(src, clientCoords, clientWeapon)
+    local ped = GetPlayerPed(src)
+    local x, y, z
+    if ped and ped ~= 0 then
+        local c = GetEntityCoords(ped)
+        if c and (c.x ~= 0 or c.y ~= 0) then x, y, z = c.x, c.y, c.z end
+    end
+    if not x and type(clientCoords) == 'table' then
+        x, y, z = clientCoords.x or clientCoords[1], clientCoords.y or clientCoords[2], clientCoords.z or clientCoords[3]
+    end
+    local hash = clientWeapon
+    if ped and ped ~= 0 then
+        local ok, h = pcall(GetPedCauseOfDeath, ped)
+        if ok and h and h ~= 0 then hash = h end
+    end
+    local weapon, cause = describeWeapon(hash)
+    return x, y, z, weapon, cause
 end
 
 --------------------------------------------------------------------------------
@@ -105,6 +196,11 @@ if RegisterConsoleListener then
         local low = message:lower()
         if low:find('error') or low:find('erreur') or low:find('exception') then level = 'error'
         elseif low:find('warn') then level = 'warn' end
+        -- Detections anticheat : remontees en warn pour declencher les alertes du panel.
+        if level == 'info' and channel and channel:lower():find('anticheat')
+            and (low:find('detect') or low:find('ban') or low:find('kick') or low:find('suspect') or low:find('flag') or low:find('cheat')) then
+            level = 'warn'
+        end
         pushLog(message:sub(1, 4000), { channel = channel or 'console', level = level, source = 'console' })
     end)
 else
@@ -129,7 +225,9 @@ end)
 RegisterNetEvent('QBCore:Server:OnPlayerLoaded', function()
     local src = source
     local cid, name = ident(src)
-    push({ type = 'event', subtype = 'character_loaded', src = src, citizenid = cid, player_name = name, data = {} })
+    -- La licence permet a l'API de rattacher la session ouverte a ce personnage.
+    push({ type = 'event', subtype = 'character_loaded', src = src, citizenid = cid, player_name = name,
+           data = { license = GetPlayerIdentifierByType(src, 'license') } })
 end)
 
 AddEventHandler('playerDropped', function(reason)
@@ -142,6 +240,21 @@ AddEventHandler('playerDropped', function(reason)
         player_name = name,
         data = { reason = reason, license = GetPlayerIdentifierByType(src, 'license') },
     })
+    -- Dernier releve "hors ligne", sinon le panel garde le joueur en ligne jusqu'au prochain backfill.
+    local ok, player = pcall(function() return exports.qbx_core:GetPlayer(src) end)
+    local pd = ok and player and player.PlayerData
+    if pd and pd.citizenid then
+        local money = pd.money or {}
+        push({
+            type = 'player_snapshot', citizenid = pd.citizenid, player_name = name, src = src,
+            data = {
+                job = pd.job and pd.job.name, job_grade = pd.job and pd.job.grade and pd.job.grade.level,
+                gang = pd.gang and pd.gang.name,
+                cash = money.cash or 0, bank = money.bank or 0, crypto = money.crypto or 0,
+                online = false,
+            },
+        })
+    end
 end)
 
 --------------------------------------------------------------------------------
@@ -151,29 +264,28 @@ end)
 RegisterNetEvent('baseevents:onPlayerDied', function(killerType, coords)
     local src = source
     local cid, name = ident(src)
+    local x, y, z, weapon, cause = deathInfo(src, coords, nil)
     push({
         type = 'death', src = src, citizenid = cid, player_name = name,
-        data = {
-            cause = 'died', killer_type = killerType,
-            x = coords and coords[1], y = coords and coords[2], z = coords and coords[3],
-        },
+        data = { cause = cause, weapon = weapon, killer_type = killerType, x = x, y = y, z = z },
     })
 end)
 
+-- Attention : deathData.killerpos est la position du TUEUR ; la position de la victime vient du serveur.
 RegisterNetEvent('baseevents:onPlayerKilled', function(killerId, deathData)
     local src = source
     local cid, name = ident(src)
     local kcid, kname
     if killerId and killerId > 0 then kcid, kname = ident(killerId) end
     deathData = deathData or {}
-    local coords = deathData.killerpos or {}
+    local x, y, z, weapon, cause = deathInfo(src, nil, deathData.weaponhash)
     push({
         type = 'death', src = src, citizenid = cid, player_name = name,
         data = {
-            cause = 'killed',
+            cause = cause, weapon = weapon,
             killer_cid = kcid, killer_name = kname,
-            weapon = deathData.weaponhash and tostring(deathData.weaponhash) or nil,
-            x = coords[1], y = coords[2], z = coords[3],
+            killer_in_vehicle = deathData.killerinveh or nil,
+            x = x, y = y, z = z,
         },
     })
 end)
@@ -245,19 +357,64 @@ end
 AddEventHandler('bl_telemetry:event', logEvent)
 exports('LogEvent', logEvent)
 
+-- Detection anticheat explicite -> alerte immediate dans le panel (et Discord).
+--  exports.bl_telemetry:Anticheat(source, 'noclip', { vitesse = 42 })
+--  TriggerEvent('bl_telemetry:anticheat', source, 'noclip', { ... })
+local function anticheat(src, reason, details)
+    src = tonumber(src)
+    local cid, name
+    if src and src > 0 then cid, name = ident(src) end
+    push({
+        type = 'anticheat', src = src, citizenid = cid, player_name = name,
+        data = { reason = tostring(reason or 'detection'), details = type(details) == 'table' and details or { info = details } },
+    })
+end
+AddEventHandler('bl_telemetry:anticheat', anticheat)
+exports('Anticheat', anticheat)
+
 --------------------------------------------------------------------------------
 -- Snapshots periodiques : economie + joueurs online
 --------------------------------------------------------------------------------
 
+-- Argent des societes : requete reglable par convar, sinon on essaie les tables courantes.
+local SOCIETY_CANDIDATES = {
+    GetConvar('telemetry_society_sql', ''),
+    'SELECT COALESCE(SUM(amount), 0) AS total FROM management_funds',
+    'SELECT COALESCE(SUM(amount), 0) AS total FROM bank_accounts_new',
+}
+local societySql -- false = aucune table trouvee
+
+local function societyTotal()
+    if societySql == false then return nil end
+    if societySql then
+        local ok, v = pcall(MySQL.scalar.await, societySql)
+        return ok and tonumber(v) or nil
+    end
+    for _, sql in ipairs(SOCIETY_CANDIDATES) do
+        if sql ~= '' then
+            local ok, v = pcall(MySQL.scalar.await, sql)
+            if ok and v ~= nil then
+                societySql = sql
+                return tonumber(v)
+            end
+        end
+    end
+    societySql = false
+    print('^3[bl_telemetry] argent des societes : aucune table trouvee (convar telemetry_society_sql)^0')
+    return nil
+end
+
 local function snapshotEconomy()
-    MySQL.single([[
-        SELECT COUNT(*) AS chars_total,
-               COALESCE(SUM(CAST(JSON_EXTRACT(money, '$.cash') AS DECIMAL(18,2))), 0)   AS total_cash,
-               COALESCE(SUM(CAST(JSON_EXTRACT(money, '$.bank') AS DECIMAL(18,2))), 0)   AS total_bank,
-               COALESCE(SUM(CAST(JSON_EXTRACT(money, '$.crypto') AS DECIMAL(18,4))), 0) AS total_crypto
-        FROM players
-    ]], {}, function(row)
+    CreateThread(function()
+        local row = MySQL.single.await([[
+            SELECT COUNT(*) AS chars_total,
+                   COALESCE(SUM(CAST(JSON_EXTRACT(money, '$.cash') AS DECIMAL(30,2))), 0)   AS total_cash,
+                   COALESCE(SUM(CAST(JSON_EXTRACT(money, '$.bank') AS DECIMAL(30,2))), 0)   AS total_bank,
+                   COALESCE(SUM(CAST(JSON_EXTRACT(money, '$.crypto') AS DECIMAL(30,4))), 0) AS total_crypto
+            FROM players
+        ]])
         if not row then return end
+        local society = societyTotal()
         push({
             type = 'economy_snapshot',
             data = {
@@ -266,6 +423,7 @@ local function snapshotEconomy()
                 total_cash = math.floor(tonumber(row.total_cash) or 0),
                 total_bank = math.floor(tonumber(row.total_bank) or 0),
                 total_crypto = tonumber(row.total_crypto) or 0,
+                society_total = society and math.floor(society) or nil,
             },
         })
     end)
