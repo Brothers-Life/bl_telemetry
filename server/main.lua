@@ -10,6 +10,7 @@
     Facultatif :
         set telemetry_society_sql "SELECT COALESCE(SUM(amount),0) AS total FROM management_funds"
         set telemetry_live_ms 30000   -- relecture des tables banque / shops (0 = off)
+        set telemetry_commands_ms 5000 -- relève des ordres du panel (annonces) (0 = off)
 ]]
 
 local URL   = GetConvar('telemetry_url', '')
@@ -191,11 +192,13 @@ if RegisterConsoleListener then
         if channel and channel:find('bl_telemetry') then return end
         if message:find('bl_telemetry') then return end
         -- Bruit recurrent sans valeur d'analyse.
-        if message:find('Sending heartbeat') or message:find('server thread hitch') == 1 then return end
+        if message:find('Sending heartbeat') then return end
         local level = 'info'
         local low = message:lower()
         if low:find('error') or low:find('erreur') or low:find('exception') then level = 'error'
         elseif low:find('warn') then level = 'warn' end
+        -- Ralentissements du serveur : gardes en warn pour la page Scripts du panel.
+        if low:find('hitch warning') then level = 'warn' end
         -- Detections anticheat : remontees en warn pour declencher les alertes du panel.
         if level == 'info' and channel and channel:lower():find('anticheat')
             and (low:find('detect') or low:find('ban') or low:find('kick') or low:find('suspect') or low:find('flag') or low:find('cheat')) then
@@ -480,21 +483,91 @@ local function snapshotVehicles()
     end)
 end
 
+-- Etat de toutes les ressources (page Scripts du panel).
+local function snapshotResources()
+    local rows = {}
+    for i = 0, GetNumResources() - 1 do
+        local name = GetResourceByFindIndex(i)
+        if name then
+            rows[#rows + 1] = { name, GetResourceState(name), GetResourceMetadata(name, 'version', 0) or '', GetResourceMetadata(name, 'author', 0) or '' }
+        end
+    end
+    push({ type = 'db_snapshot', data = { name = '_resources', label = 'Ressources', kind = 'internal', columns = { 'ressource', 'etat', 'version', 'auteur' }, rows = rows } })
+end
+
 CreateThread(function()
     Wait(15000) -- laisse qbx_core/oxmysql demarrer
     push({ type = 'event', subtype = 'server_start', data = {} })
     snapshotEconomy()
     snapshotVehicles()
+    snapshotResources()
     local lastVehicles = os.time()
     while true do
         Wait(SNAPSHOT_INTERVAL_S * 1000)
         snapshotEconomy()
         snapshotPlayers()
+        snapshotResources()
         if os.time() - lastVehicles >= VEHICLE_INTERVAL_S then
             lastVehicles = os.time()
             snapshotVehicles()
         end
     end
 end)
+
+--------------------------------------------------------------------------------
+-- Ordres envoyes depuis le panel (annonces) : releves sur l'API puis executes ici.
+--------------------------------------------------------------------------------
+
+local COMMANDS_MS = GetConvarInt('telemetry_commands_ms', 5000)
+
+local function announce(p)
+    local title = tostring(p.title or 'Annonce')
+    local message = tostring(p.message or '')
+    if message == '' then return false, 'message vide' end
+    local mode = p.mode or 'both'
+    local hasLib = GetResourceState('ox_lib') == 'started'
+    if mode == 'notify' and not hasLib then mode = 'chat' end
+    if mode == 'chat' or mode == 'both' then
+        TriggerClientEvent('chat:addMessage', -1, { color = { 255, 138, 31 }, multiline = true, args = { title, message } })
+    end
+    if (mode == 'notify' or mode == 'both') and hasLib then
+        TriggerClientEvent('ox_lib:notify', -1, {
+            title = title, description = message, type = p.type or 'inform', position = 'top',
+            duration = math.min(tonumber(p.duration) or 10000, 60000),
+        })
+    end
+    return true, ('envoyee a %d joueur(s)'):format(#GetPlayers())
+end
+
+local HANDLERS = { announce = announce }
+
+local function ack(id, ok, result)
+    PerformHttpRequest(URL .. '/v1/commands/' .. id .. '/ack', function() end, 'POST',
+        json.encode({ ok = ok, result = result }),
+        { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. TOKEN })
+end
+
+if COMMANDS_MS > 0 then
+    CreateThread(function()
+        Wait(20000)
+        while true do
+            PerformHttpRequest(URL .. '/v1/commands', function(status, body)
+                if status ~= 200 or not body then return end
+                local ok, list = pcall(json.decode, body)
+                if not ok or type(list) ~= 'table' or type(list.commands) ~= 'table' then return end
+                for _, c in ipairs(list.commands) do
+                    local handler = HANDLERS[c.type]
+                    if handler then
+                        local okRun, res, detail = pcall(handler, c.payload or {})
+                        ack(c.id, okRun and res == true, okRun and detail or tostring(res))
+                    else
+                        ack(c.id, false, 'ordre inconnu : ' .. tostring(c.type))
+                    end
+                end
+            end, 'GET', '', { ['Authorization'] = 'Bearer ' .. TOKEN })
+            Wait(COMMANDS_MS)
+        end
+    end)
+end
 
 print(('^2[bl_telemetry] actif -> %s (lots: %dms)^0'):format(URL, FLUSH_INTERVAL_MS))

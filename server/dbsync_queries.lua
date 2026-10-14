@@ -3,7 +3,8 @@
     - Uniquement des SELECT (lecture seule). Une table absente est simplement ignoree.
     - Max 500 lignes par requete. Ne jamais remonter d'identifiants sensibles (license, ip, discord, steam).
     - Ajouter une entree = une nouvelle carte dans le panel, sans toucher a l'API ni au site.
-      kind : 'table' (tableau), 'bar' (barres : 1re colonne = libelle, 2e = valeur), 'donut'
+      kind : 'table' (tableau), 'bar' (barres : 1re colonne = libelle, 2e = valeur), 'donut',
+             'hidden' (utilise par le panel mais pas affiche tel quel) ; max = nombre de lignes (5000 au plus)
 ]]
 
 DBSYNC_QUERIES = {
@@ -76,6 +77,16 @@ DBSYNC_QUERIES = {
                    SUM(state = 1) AS au_garage, SUM(state = 0) AS sortis, SUM(state NOT IN (0, 1)) AS fourriere_ou_autre,
                    COUNT(*) AS total
             FROM player_vehicles GROUP BY garage ORDER BY total DESC LIMIT 50
+        ]],
+    },
+    {
+        -- Comptes lies : empreinte de la licence (jamais la licence elle-meme) par personnage. Non affiche tel quel.
+        name = 'license_map', label = 'Empreintes de licence', kind = 'hidden', max = 5000,
+        sql = [[
+            SELECT citizenid AS citizenid, LEFT(SHA2(license, 256), 16) AS empreinte,
+                   CONCAT(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(charinfo, '$.firstname')), '?'), ' ',
+                          COALESCE(JSON_UNQUOTE(JSON_EXTRACT(charinfo, '$.lastname')), '?')) AS nom
+            FROM players WHERE license IS NOT NULL
         ]],
     },
     {

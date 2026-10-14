@@ -20,6 +20,7 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 | `telemetry_snapshot_s` | `300` | Relevé économie + joueurs en ligne |
 | `telemetry_vehicles_s` | `21600` | Relevé du parc de véhicules |
 | `telemetry_live_ms` | `30000` | Relecture des tables `bank_flows`, `bank_audit_log`, `bl_shops_admin_logs` (`0` = off) |
+| `telemetry_commands_ms` | `5000` | Relève des ordres du panel (annonces) (`0` = off) |
 | `telemetry_db_s` | `900` | Lecture de la base du jeu par `dbsync.lua` (`0` = off) |
 | `telemetry_society_sql` | — | Requête qui renvoie le total des comptes sociétés (colonne unique). Sans elle, essaie `management_funds` puis `bank_accounts_new` |
 
@@ -40,6 +41,16 @@ Toutes les 15 min, le script lit la base MySQL du jeu et envoie au panel (page *
 - le résultat de chaque requête de `server/dbsync_queries.lua` : répartition des fortunes, dernière connexion des personnages, métiers, objets les plus détenus (joueurs et coffres ox_inventory), véhicules les plus possédés, véhicules par garage, derniers bannissements.
 
 Pour ajouter une info, il suffit d'ajouter une entrée dans `dbsync_queries.lua` (un `SELECT` avec des alias `AS`) : une nouvelle carte apparaît dans le panel, sans toucher à l'API ni au site. Une requête en erreur (table absente…) est ignorée et signalée une fois dans la console. Ne jamais y remonter d'identifiants sensibles (license, IP, Discord).
+
+## Suivi des tables de journal du jeu (`live.lua`)
+
+En plus de `bank_flows`, `bank_audit_log` et `bl_shops_admin_logs`, `live.lua` suit les tables listées dans `FOLLOW` (détections `bl_ac_detections`, sanctions et journal `admindash_*`, `mdt_audit`, `xt_prison`, achats premium, logs garages / jobs / shops, transactions téléphone…).
+Chaque nouvelle ligne est envoyée telle quelle (event `game_log`), **sans les colonnes sensibles** (license, IP, Discord, Steam, token, hwid…). Une table absente est ignorée. Une détection `bl_ac_detections` déclenche aussi une alerte anticheat.
+Elles alimentent la recherche globale et le journal des joueurs dans le panel.
+
+## Annonces depuis le panel
+
+Le script relève toutes les 5 s les ordres envoyés depuis le panel (`GET /v1/commands`) et les exécute : annonce dans le chat et/ou notification `ox_lib` à tous les joueurs, puis renvoie le résultat.
 
 ## Envoyer des données depuis une autre ressource
 

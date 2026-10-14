@@ -3,7 +3,7 @@ game 'gta5'
 
 name 'bl_telemetry'
 description 'Telemetrie serveur -> ingest-api (Postgres/Grafana) : events, logs console, snapshots economie/joueurs/vehicules'
-version '1.1.0'
+version '1.2.0'
 
 server_only 'yes'
 
