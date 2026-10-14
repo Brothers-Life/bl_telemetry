@@ -63,6 +63,9 @@ local FOLLOW = {
     { tbl = 'gang_safe_log' }, { tbl = 'player_transactions' }, { tbl = 'sky_phone_bank_transactions' },
     { tbl = 'sky_phone_billing_invoices' }, { tbl = 'bl_safezones_audit' }, { tbl = 'teleport_admin_logs' },
     { tbl = 'harvest_zone_logs' }, { tbl = 'door_logs' }, { tbl = 'bl_weapon_skin_log' },
+    -- actions staff supplementaires
+    { tbl = 'admindash_role_actions' }, { tbl = 'admindash_blip_logs' }, { tbl = 'admindash_staff_loans' },
+    { tbl = 'mapeditor_audit' }, { tbl = 'dj_audit' }, { tbl = 'tv_admin_logs' }, { tbl = 'qbx_vehicle_admin_probe' },
 }
 local FOLLOW_BACKLOG = 200 -- au premier lancement, on reprend les 200 dernieres lignes de chaque table
 

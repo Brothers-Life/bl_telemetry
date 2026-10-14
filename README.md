@@ -20,7 +20,7 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 | `telemetry_snapshot_s` | `300` | Relevé économie + joueurs en ligne |
 | `telemetry_vehicles_s` | `21600` | Relevé du parc de véhicules |
 | `telemetry_live_ms` | `30000` | Relecture des tables `bank_flows`, `bank_audit_log`, `bl_shops_admin_logs` (`0` = off) |
-| `telemetry_commands_ms` | `5000` | Relève des ordres du panel (annonces) (`0` = off) |
+| `telemetry_commands` | `1` | Annonces du panel reçues avec chaque envoi (`0` = off) |
 | `telemetry_db_s` | `900` | Lecture de la base du jeu par `dbsync.lua` (`0` = off) |
 | `telemetry_society_sql` | — | Requête qui renvoie le total des comptes sociétés (colonne unique). Sans elle, essaie `management_funds` puis `bank_accounts_new` |
 
@@ -29,7 +29,7 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 - Console serveur complète (niveau déduit du message ; les détections du canal anticheat passent en `warn`)
 - Connexions / déconnexions, personnage chargé (rattaché à la session), relevé « hors ligne » à la déconnexion
 - Morts : position de la **victime** et cause lues côté serveur (OneSync), nom de l'arme, tueur
-- Chat et commandes, actions staff txAdmin, explosions
+- Chat et commandes, actions staff txAdmin (kick, ban, warn, soin, message privé, annonce, annulation, whitelist, redémarrages), explosions
 - Relevés périodiques : économie (cash, banque, crypto, sociétés), joueurs en ligne (argent, métier, gang, inventaire), véhicules
 - Historique au premier démarrage (`backfill.lua`), puis suivi continu (`live.lua`)
 
@@ -50,7 +50,14 @@ Elles alimentent la recherche globale et le journal des joueurs dans le panel.
 
 ## Annonces depuis le panel
 
-Le script relève toutes les 5 s les ordres envoyés depuis le panel (`GET /v1/commands`) et les exécute : annonce dans le chat et/ou notification `ox_lib` à tous les joueurs, puis renvoie le résultat.
+Les annonces envoyées depuis le panel arrivent dans la réponse de chaque envoi (`POST /v1/batch?commands=1`, toutes les 5 s) : annonce dans le chat et/ou notification `ox_lib` à tous les joueurs ; le résultat repart avec l'envoi suivant. Aucune requête en plus.
+
+## Performances
+
+- Files d'attente à indices (ajout/retrait instantanés), bornées à 10 000 éléments chacune, avec avertissement si des éléments sont abandonnés.
+- Un seul envoi à la fois, lots de 300 événements + 500 lignes de console ; s'il reste du retard, renvoi immédiat ; si l'API est en panne, attente croissante (2 s → 60 s) sans rien perdre.
+- Identité des joueurs mise en cache 60 s ; explosions limitées à 10 par joueur et par 10 s (au-delà, un résumé `explosion_flood`).
+- Relevé des véhicules et suivi des tables étalés pour ne jamais saturer la file.
 
 ## Envoyer des données depuis une autre ressource
 

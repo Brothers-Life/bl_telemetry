@@ -10,7 +10,7 @@
     Facultatif :
         set telemetry_society_sql "SELECT COALESCE(SUM(amount),0) AS total FROM management_funds"
         set telemetry_live_ms 30000   -- relecture des tables banque / shops (0 = off)
-        set telemetry_commands_ms 5000 -- relève des ordres du panel (annonces) (0 = off)
+        set telemetry_commands 1       -- ordres du panel (annonces) recus avec chaque envoi (0 = off)
 ]]
 
 local URL   = GetConvar('telemetry_url', '')
@@ -19,8 +19,10 @@ local TOKEN = GetConvar('telemetry_token', '')
 local FLUSH_INTERVAL_MS   = GetConvarInt('telemetry_flush_ms', 5000)
 local SNAPSHOT_INTERVAL_S = GetConvarInt('telemetry_snapshot_s', 300)   -- economie + joueurs online
 local VEHICLE_INTERVAL_S  = GetConvarInt('telemetry_vehicles_s', 21600) -- parc vehicules complet
-local MAX_QUEUE           = 5000
-local MAX_BATCH           = 200
+local MAX_QUEUE           = 10000  -- par file (events / logs)
+local MAX_BATCH_EVENTS    = 300
+local MAX_BATCH_LOGS      = 500
+local COMMANDS_ENABLED    = GetConvarInt('telemetry_commands', 1) == 1
 
 if URL == '' or TOKEN == '' then
     print('^1[bl_telemetry] telemetry_url / telemetry_token manquants — telemetrie desactivee^0')
@@ -28,35 +30,71 @@ if URL == '' or TOKEN == '' then
 end
 URL = URL:gsub('/$', '')
 
-local queue = {}      -- events
-local logQueue = {}   -- lignes console / logs
+-- File FIFO a indices (ajout et retrait en O(1), contrairement a table.remove(t, 1)).
+local function newQueue() return { first = 1, last = 0, items = {}, dropped = 0 } end
+local function qsize(q) return q.last - q.first + 1 end
+local function qpush(q, v)
+    if qsize(q) >= MAX_QUEUE then -- file pleine : on sacrifie le plus ancien
+        q.items[q.first] = nil
+        q.first = q.first + 1
+        q.dropped = q.dropped + 1
+    end
+    q.last = q.last + 1
+    q.items[q.last] = v
+end
+local function qtake(q, n)
+    local out = {}
+    for i = 1, math.min(n, qsize(q)) do
+        out[i] = q.items[q.first]
+        q.items[q.first] = nil
+        q.first = q.first + 1
+    end
+    return out
+end
+local function qrequeue(q, list) -- remet un lot non envoye en tete, dans l'ordre
+    for i = #list, 1, -1 do
+        q.first = q.first - 1
+        q.items[q.first] = list[i]
+    end
+    while qsize(q) > MAX_QUEUE do q.items[q.first] = nil; q.first = q.first + 1; q.dropped = q.dropped + 1 end
+end
+
+local queue = newQueue()      -- events
+local logQueue = newQueue()   -- lignes console / logs
 
 local function now() return os.time() * 1000 end
 
 local function push(ev)
-    if #queue >= MAX_QUEUE then table.remove(queue, 1) end
     ev.ts = ev.ts or now()
-    queue[#queue + 1] = ev
+    qpush(queue, ev)
 end
 
 local function pushLog(line, labels)
-    if #logQueue >= MAX_QUEUE then table.remove(logQueue, 1) end
-    logQueue[#logQueue + 1] = { ts = now(), line = line, labels = labels }
+    qpush(logQueue, { ts = now(), line = line, labels = labels })
 end
 
--- Exposes pour server/backfill.lua (meme etat Lua, scripts serveur partages).
+-- Exposes pour backfill.lua, live.lua et dbsync.lua (meme etat Lua, scripts serveur partages).
 TelemetryPush = push
-TelemetryQueueSize = function() return #queue end
+TelemetryQueueSize = function() return qsize(queue) end
 
--- Renvoie citizenid + nom RP pour une source, sans jamais planter si qbx_core absent.
+-- citizenid + nom RP d'une source, avec cache (60 s) : evite un appel a qbx_core a chaque chat / mort / explosion.
+local identCache = {}
 local function ident(src)
+    src = tonumber(src)
+    if not src or src <= 0 then return nil, nil end
+    local c = identCache[src]
+    if c and GetGameTimer() - c.t < 60000 then return c.cid, c.name end
+    local cid, name
     local ok, player = pcall(function() return exports.qbx_core:GetPlayer(src) end)
-    if ok and player then
+    if ok and player and player.PlayerData then
         local pd = player.PlayerData
         local ci = pd.charinfo or {}
-        return pd.citizenid, ('%s %s'):format(ci.firstname or '?', ci.lastname or '?')
+        cid, name = pd.citizenid, ('%s %s'):format(ci.firstname or '?', ci.lastname or '?')
+    else
+        name = GetPlayerName(src)
     end
-    return nil, GetPlayerName(src)
+    identCache[src] = { cid = cid, name = name, t = GetGameTimer() }
+    return cid, name
 end
 
 -- Hash d'arme -> nom lisible. Les hash arrivent signes ou non selon la source : on normalise.
@@ -151,34 +189,55 @@ end
 -- Envoi par lots
 --------------------------------------------------------------------------------
 
-local function flush()
-    if #queue == 0 and #logQueue == 0 then return end
+-- Un seul envoi a la fois ; en cas de panne de l'API, attente croissante (2 s -> 60 s) ;
+-- s'il reste du retard apres un envoi reussi, on renvoie aussitot (vidange) au lieu d'attendre 5 s.
+-- Les ordres du panel (annonces) arrivent dans la reponse, et leurs resultats repartent avec l'envoi suivant.
+local inFlight, failures, nextTry = false, 0, 0
+local pendingAcks = {}
+local runCommands -- defini plus bas
 
-    local events = {}
-    for _ = 1, math.min(#queue, MAX_BATCH) do
-        events[#events + 1] = table.remove(queue, 1)
-    end
-    local logs = {}
-    for _ = 1, math.min(#logQueue, MAX_BATCH) do
-        logs[#logs + 1] = table.remove(logQueue, 1)
-    end
+local HEADERS = { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. TOKEN }
 
-    PerformHttpRequest(URL .. '/v1/batch', function(status)
+local function flush(force)
+    if inFlight or GetGameTimer() < nextTry then return end
+    local events = qtake(queue, MAX_BATCH_EVENTS)
+    local logs = qtake(logQueue, MAX_BATCH_LOGS)
+    local acks = pendingAcks
+    if #events == 0 and #logs == 0 and #acks == 0 and not force then return end
+    pendingAcks = {}
+    inFlight = true
+
+    local body = { events = events, logs = logs }
+    if #acks > 0 then body.acks = acks end
+    PerformHttpRequest(URL .. '/v1/batch' .. (COMMANDS_ENABLED and '?commands=1' or ''), function(status, resp)
+        inFlight = false
         if status ~= 200 then
-            -- On remet en tete de file (borne par MAX_QUEUE au prochain push).
-            for i = #events, 1, -1 do table.insert(queue, 1, events[i]) end
-            for i = #logs, 1, -1 do table.insert(logQueue, 1, logs[i]) end
+            qrequeue(queue, events)
+            qrequeue(logQueue, logs)
+            for _, a in ipairs(acks) do pendingAcks[#pendingAcks + 1] = a end
+            failures = failures + 1
+            nextTry = GetGameTimer() + math.min(60000, 1000 * 2 ^ math.min(failures, 6))
+            return
         end
-    end, 'POST', json.encode({ events = events, logs = logs }), {
-        ['Content-Type']  = 'application/json',
-        ['Authorization'] = 'Bearer ' .. TOKEN,
-    })
+        failures, nextTry = 0, 0
+        if COMMANDS_ENABLED and resp and resp ~= '' and runCommands then runCommands(resp) end
+        if qsize(queue) > 0 or qsize(logQueue) >= MAX_BATCH_LOGS or #pendingAcks > 0 then
+            SetTimeout(200, flush)
+        end
+    end, 'POST', json.encode(body), HEADERS)
 end
 
 CreateThread(function()
+    local lastDropWarn = 0
     while true do
         Wait(FLUSH_INTERVAL_MS)
-        flush()
+        flush(COMMANDS_ENABLED) -- envoi a vide si besoin, pour relever les annonces
+        local dropped = queue.dropped + logQueue.dropped
+        if dropped > 0 and GetGameTimer() - lastDropWarn > 60000 then
+            lastDropWarn = GetGameTimer()
+            print(('^3[bl_telemetry] file pleine : %d element(s) abandonne(s) (API lente ou injoignable ?)^0'):format(dropped))
+            queue.dropped, logQueue.dropped = 0, 0
+        end
     end
 end)
 
@@ -189,12 +248,12 @@ end)
 if RegisterConsoleListener then
     RegisterConsoleListener(function(channel, message)
         if not message or message == '' then return end
-        if channel and channel:find('bl_telemetry') then return end
-        if message:find('bl_telemetry') then return end
+        if channel and channel:find('bl_telemetry', 1, true) then return end
+        if message:find('bl_telemetry', 1, true) then return end
         -- Bruit recurrent sans valeur d'analyse.
-        if message:find('Sending heartbeat') then return end
+        if message:find('Sending heartbeat', 1, true) then return end
         local level = 'info'
-        local low = message:lower()
+        local low = message:sub(1, 400):lower() -- le niveau se lit en debut de ligne
         if low:find('error') or low:find('erreur') or low:find('exception') then level = 'error'
         elseif low:find('warn') then level = 'warn' end
         -- Ralentissements du serveur : gardes en warn pour la page Scripts du panel.
@@ -227,6 +286,7 @@ end)
 -- Une fois le personnage charge, on complete avec le citizenid.
 RegisterNetEvent('QBCore:Server:OnPlayerLoaded', function()
     local src = source
+    identCache[src] = nil -- changement de personnage possible
     local cid, name = ident(src)
     -- La licence permet a l'API de rattacher la session ouverte a ce personnage.
     push({ type = 'event', subtype = 'character_loaded', src = src, citizenid = cid, player_name = name,
@@ -243,6 +303,7 @@ AddEventHandler('playerDropped', function(reason)
         player_name = name,
         data = { reason = reason, license = GetPlayerIdentifierByType(src, 'license') },
     })
+    identCache[src] = nil
     -- Dernier releve "hors ligne", sinon le panel garde le joueur en ligne jusqu'au prochain backfill.
     local ok, player = pcall(function() return exports.qbx_core:GetPlayer(src) end)
     local pd = ok and player and player.PlayerData
@@ -314,15 +375,21 @@ end)
 
 local function txEvent(action)
     return function(data)
-        data = data or {}
+        data = type(data) == 'table' and data or {}
+        local target = tonumber(data.target or data.targetNetId or data.id)
+        local tcid, tname
+        if target and target > 0 then tcid, tname = ident(target) end
         push({
             type = 'admin_action',
+            citizenid = tcid,
             data = {
                 action = action,
-                admin_name = data.author,
-                target_name = data.targetName or (data.target and tostring(data.target)),
-                reason = data.reason,
+                admin_name = data.author or data.adminName or data.revokedBy,
+                target_name = data.targetName or tname or (data.target and tostring(data.target)),
+                target_cid = tcid,
+                reason = data.reason or data.message,
                 duration = data.durationTranslated or data.duration,
+                source = 'txAdmin',
             },
         })
     end
@@ -333,17 +400,57 @@ AddEventHandler('txAdmin:events:playerBanned', txEvent('ban'))
 AddEventHandler('txAdmin:events:playerWarned', txEvent('warn'))
 AddEventHandler('txAdmin:events:serverShuttingDown', txEvent('server_shutdown'))
 AddEventHandler('txAdmin:events:scheduledRestart', txEvent('scheduled_restart'))
+AddEventHandler('txAdmin:events:skippedNextScheduledRestart', txEvent('restart_skipped'))
+AddEventHandler('txAdmin:events:playerHealed', txEvent('heal'))
+AddEventHandler('txAdmin:events:playerDirectMessage', txEvent('direct_message'))
+AddEventHandler('txAdmin:events:announcement', txEvent('announcement'))
+AddEventHandler('txAdmin:events:actionRevoked', txEvent('revoke'))
+AddEventHandler('txAdmin:events:whitelistPlayer', txEvent('whitelist'))
+AddEventHandler('txAdmin:events:whitelistPreApproval', txEvent('whitelist_preapproval'))
 
 --------------------------------------------------------------------------------
 -- Explosions (anticheat / anomalies)
 --------------------------------------------------------------------------------
 
+-- Limite : 10 explosions par joueur toutes les 10 s ; au-dela, un seul resume (un tricheur peut en generer des centaines).
+local explosionWindow = {}
+local EXPLOSION_MAX, EXPLOSION_WINDOW_MS = 10, 10000
+
+local function flushExplosionWindow(sender, w)
+    if w.suppressed > 0 then
+        push({
+            type = 'event', subtype = 'explosion_flood', src = sender, citizenid = w.cid, player_name = w.name,
+            data = { count = w.count, suppressed = w.suppressed, window_s = EXPLOSION_WINDOW_MS / 1000 },
+        })
+    end
+end
+
 AddEventHandler('explosionEvent', function(sender, ev)
-    local cid, name = ident(sender)
+    local t = GetGameTimer()
+    local w = explosionWindow[sender]
+    if not w or t - w.start > EXPLOSION_WINDOW_MS then
+        if w then flushExplosionWindow(sender, w) end
+        local cid, name = ident(sender)
+        w = { start = t, count = 0, suppressed = 0, cid = cid, name = name }
+        explosionWindow[sender] = w
+    end
+    w.count = w.count + 1
+    if w.count > EXPLOSION_MAX then w.suppressed = w.suppressed + 1; return end
     push({
-        type = 'event', subtype = 'explosion', src = sender, citizenid = cid, player_name = name,
+        type = 'event', subtype = 'explosion', src = sender, citizenid = w.cid, player_name = w.name,
         data = { explosion_type = ev and ev.explosionType, x = ev and ev.posX, y = ev and ev.posY, z = ev and ev.posZ },
     })
+end)
+
+-- Ferme les fenetres d'explosions terminees (resume des rafales) et nettoie le cache des joueurs partis.
+CreateThread(function()
+    while true do
+        Wait(EXPLOSION_WINDOW_MS)
+        local t = GetGameTimer()
+        for sender, w in pairs(explosionWindow) do
+            if t - w.start > EXPLOSION_WINDOW_MS then flushExplosionWindow(sender, w); explosionWindow[sender] = nil end
+        end
+    end
 end)
 
 --------------------------------------------------------------------------------
@@ -469,11 +576,12 @@ local function snapshotPlayers()
 end
 
 local function snapshotVehicles()
-    MySQL.query([[
-        SELECT citizenid, plate, vehicle, garage, state FROM player_vehicles LIMIT 8000
-    ]], {}, function(rows)
-        if not rows then return end
-        for _, r in ipairs(rows) do
+    CreateThread(function()
+        local rows = MySQL.query.await('SELECT citizenid, plate, vehicle, garage, state FROM player_vehicles LIMIT 20000') or {}
+        for i, r in ipairs(rows) do
+            if i % 200 == 0 then
+                while qsize(queue) > MAX_QUEUE / 2 do Wait(1000) end -- laisse l'envoi respirer
+            end
             push({
                 type = 'vehicle_snapshot',
                 citizenid = r.citizenid,
@@ -518,8 +626,6 @@ end)
 -- Ordres envoyes depuis le panel (annonces) : releves sur l'API puis executes ici.
 --------------------------------------------------------------------------------
 
-local COMMANDS_MS = GetConvarInt('telemetry_commands_ms', 5000)
-
 local function announce(p)
     local title = tostring(p.title or 'Annonce')
     local message = tostring(p.message or '')
@@ -541,33 +647,21 @@ end
 
 local HANDLERS = { announce = announce }
 
-local function ack(id, ok, result)
-    PerformHttpRequest(URL .. '/v1/commands/' .. id .. '/ack', function() end, 'POST',
-        json.encode({ ok = ok, result = result }),
-        { ['Content-Type'] = 'application/json', ['Authorization'] = 'Bearer ' .. TOKEN })
-end
-
-if COMMANDS_MS > 0 then
-    CreateThread(function()
-        Wait(20000)
-        while true do
-            PerformHttpRequest(URL .. '/v1/commands', function(status, body)
-                if status ~= 200 or not body then return end
-                local ok, list = pcall(json.decode, body)
-                if not ok or type(list) ~= 'table' or type(list.commands) ~= 'table' then return end
-                for _, c in ipairs(list.commands) do
-                    local handler = HANDLERS[c.type]
-                    if handler then
-                        local okRun, res, detail = pcall(handler, c.payload or {})
-                        ack(c.id, okRun and res == true, okRun and detail or tostring(res))
-                    else
-                        ack(c.id, false, 'ordre inconnu : ' .. tostring(c.type))
-                    end
-                end
-            end, 'GET', '', { ['Authorization'] = 'Bearer ' .. TOKEN })
-            Wait(COMMANDS_MS)
+-- Execute les ordres recus dans la reponse de /v1/batch ; le resultat repart avec l'envoi suivant.
+runCommands = function(resp)
+    local ok, data = pcall(json.decode, resp)
+    if not ok or type(data) ~= 'table' or type(data.commands) ~= 'table' then return end
+    for _, c in ipairs(data.commands) do
+        local handler = HANDLERS[c.type]
+        local res, detail
+        if handler then
+            local okRun, r1, r2 = pcall(handler, c.payload or {})
+            res, detail = okRun and r1 == true, okRun and r2 or tostring(r1)
+        else
+            res, detail = false, 'ordre inconnu : ' .. tostring(c.type)
         end
-    end)
+        pendingAcks[#pendingAcks + 1] = { id = c.id, ok = res, result = detail }
+    end
 end
 
-print(('^2[bl_telemetry] actif -> %s (lots: %dms)^0'):format(URL, FLUSH_INTERVAL_MS))
+print(('^2[bl_telemetry] actif -> %s (lots: %dms, annonces: %s)^0'):format(URL, FLUSH_INTERVAL_MS, COMMANDS_ENABLED and 'oui' or 'non'))
