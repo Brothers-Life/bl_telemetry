@@ -43,7 +43,7 @@ local function columnsFromSql(sql)
     return out
 end
 
-local function runQuery(q)
+local function runQuery(q, pos)
     if disabled[q.name] then return end
     local ok, rows = pcall(MySQL.query.await, q.sql)
     if not ok or type(rows) ~= 'table' then
@@ -61,7 +61,7 @@ local function runQuery(q)
     end
     pushEvent({
         type = 'db_snapshot',
-        data = { name = q.name, label = q.label or q.name, kind = q.kind or 'table', columns = cols, rows = out },
+        data = { name = q.name, label = q.label or q.name, kind = q.kind or 'table', pos = pos, columns = cols, rows = out },
     })
 end
 
@@ -84,9 +84,9 @@ CreateThread(function()
     Wait(45000) -- apres le demarrage, le backfill et live.lua
     while true do
         tableStats()
-        for _, q in ipairs(DBSYNC_QUERIES) do
+        for i, q in ipairs(DBSYNC_QUERIES) do
             if type(q) == 'table' and q.name and q.sql then
-                runQuery(q)
+                runQuery(q, i)
                 Wait(500) -- on etale la charge sur la base
             end
         end
