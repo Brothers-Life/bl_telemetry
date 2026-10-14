@@ -2,12 +2,14 @@ fx_version 'cerulean'
 game 'gta5'
 
 name 'bl_telemetry'
-description 'Telemetrie serveur -> ingest-api (Postgres/Grafana) : events, logs console, snapshots economie/joueurs/vehicules'
-version '1.3.0'
-
-server_only 'yes'
+description 'Telemetrie serveur -> bl-panel-api : events, logs console, snapshots, journaux du jeu, performances'
+version '1.4.0'
 
 use_experimental_fxv2_oal 'yes'
+
+client_scripts {
+    'client/perf.lua',
+}
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
@@ -16,6 +18,7 @@ server_scripts {
     'server/live.lua',
     'server/dbsync_queries.lua',
     'server/dbsync.lua',
+    'server/perf.lua',
 }
 
 dependencies {

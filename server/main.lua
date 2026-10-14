@@ -591,16 +591,29 @@ local function snapshotVehicles()
     end)
 end
 
--- Etat de toutes les ressources (page Scripts du panel).
+-- Etat de toutes les ressources (pages Scripts et Performances du panel) :
+-- carte / MLO, fichiers de donnees (data_file), scripts client / serveur et fichiers envoyes aux joueurs.
+local function metaCount(name, ...)
+    local n = 0
+    for _, key in ipairs({ ... }) do n = n + (GetNumResourceMetadata(name, key) or 0) end
+    return n
+end
+
 local function snapshotResources()
     local rows = {}
     for i = 0, GetNumResources() - 1 do
         local name = GetResourceByFindIndex(i)
         if name then
-            rows[#rows + 1] = { name, GetResourceState(name), GetResourceMetadata(name, 'version', 0) or '', GetResourceMetadata(name, 'author', 0) or '' }
+            local isMap = (GetResourceMetadata(name, 'this_is_a_map', 0) or '') ~= ''
+            rows[#rows + 1] = {
+                name, GetResourceState(name), GetResourceMetadata(name, 'version', 0) or '', GetResourceMetadata(name, 'author', 0) or '',
+                isMap and 1 or 0, metaCount(name, 'data_file'), metaCount(name, 'client_script', 'client_scripts'),
+                metaCount(name, 'server_script', 'server_scripts'), metaCount(name, 'file', 'files'),
+            }
         end
     end
-    push({ type = 'db_snapshot', data = { name = '_resources', label = 'Ressources', kind = 'internal', columns = { 'ressource', 'etat', 'version', 'auteur' }, rows = rows } })
+    push({ type = 'db_snapshot', data = { name = '_resources', label = 'Ressources', kind = 'internal',
+        columns = { 'ressource', 'etat', 'version', 'auteur', 'carte', 'data_files', 'scripts_client', 'scripts_serveur', 'fichiers' }, rows = rows } })
 end
 
 CreateThread(function()

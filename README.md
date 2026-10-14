@@ -22,6 +22,9 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 | `telemetry_live_ms` | `30000` | Relecture des tables `bank_flows`, `bank_audit_log`, `bl_shops_admin_logs` (`0` = off) |
 | `telemetry_commands` | `1` | Annonces du panel reçues avec chaque envoi (`0` = off) |
 | `telemetry_db_s` | `900` | Lecture de la base du jeu par `dbsync.lua` (`0` = off) |
+| `telemetry_perf_s` | `300` | Regroupement des performances joueurs + entités (`0` = off) |
+| `telemetry_profiler_min` | `30` | Échantillon du profiler FiveM toutes les N minutes (`0` = off) |
+| `telemetry_profiler_frames` | `300` | Durée de chaque échantillon (en images serveur) |
 | `telemetry_society_sql` | — | Requête qui renvoie le total des comptes sociétés (colonne unique). Sans elle, essaie `management_funds` puis `bank_accounts_new` |
 
 ## Ce qui est envoyé automatiquement
@@ -47,6 +50,18 @@ Pour ajouter une info, il suffit d'ajouter une entrée dans `dbsync_queries.lua`
 En plus de `bank_flows`, `bank_audit_log` et `bl_shops_admin_logs`, `live.lua` suit les tables listées dans `FOLLOW` (détections `bl_ac_detections`, sanctions et journal `admindash_*`, `mdt_audit`, `xt_prison`, achats premium, logs garages / jobs / shops, transactions téléphone…).
 Chaque nouvelle ligne est envoyée telle quelle (event `game_log`), **sans les colonnes sensibles** (license, IP, Discord, Steam, token, hwid…). Une table absente est ignorée. Une détection `bl_ac_detections` déclenche aussi une alerte anticheat.
 Elles alimentent la recherche globale et le journal des joueurs dans le panel.
+
+## Performances (page Performances du panel)
+
+- **Joueurs** (`client/perf.lua`, très léger) : toutes les 20 s, FPS sur 1 s, pire image, position, intérieur (MLO) et nombre d'entités chargées autour ; envoyé par paquets (1 message / min / joueur, limité côté serveur).
+- **Serveur** (`server/perf.lua`) : toutes les 5 min, un seul résumé : FPS par zone de 250 m, par intérieur (MLO) et par joueur (avec ping), répartition des FPS, entités existantes (véhicules, peds, objets) et modèles les plus nombreux.
+- **Coût des ressources** : échantillon du profiler FiveM toutes les 30 min, temps passé par ressource. Nécessite dans `server.cfg` :
+
+```cfg
+add_ace resource.bl_telemetry command.profiler allow
+```
+
+- **Ressources** : carte / MLO (`this_is_a_map`), fichiers de données, scripts client / serveur et fichiers envoyés aux joueurs.
 
 ## Annonces depuis le panel
 
