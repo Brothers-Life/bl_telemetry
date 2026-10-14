@@ -20,6 +20,7 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 | `telemetry_snapshot_s` | `300` | Relevé économie + joueurs en ligne |
 | `telemetry_vehicles_s` | `21600` | Relevé du parc de véhicules |
 | `telemetry_live_ms` | `30000` | Relecture des tables `bank_flows`, `bank_audit_log`, `bl_shops_admin_logs` (`0` = off) |
+| `telemetry_db_s` | `900` | Lecture de la base du jeu par `dbsync.lua` (`0` = off) |
 | `telemetry_society_sql` | — | Requête qui renvoie le total des comptes sociétés (colonne unique). Sans elle, essaie `management_funds` puis `bank_accounts_new` |
 
 ## Ce qui est envoyé automatiquement
@@ -30,6 +31,15 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 - Chat et commandes, actions staff txAdmin, explosions
 - Relevés périodiques : économie (cash, banque, crypto, sociétés), joueurs en ligne (argent, métier, gang, inventaire), véhicules
 - Historique au premier démarrage (`backfill.lua`), puis suivi continu (`live.lua`)
+
+## Lecture de la base du jeu (`dbsync.lua`)
+
+Toutes les 15 min, le script lit la base MySQL du jeu et envoie au panel (page **Base de données**) :
+
+- la taille et le nombre de lignes de chaque table ;
+- le résultat de chaque requête de `server/dbsync_queries.lua` : répartition des fortunes, dernière connexion des personnages, métiers, objets les plus détenus (joueurs et coffres ox_inventory), véhicules les plus possédés, véhicules par garage, derniers bannissements.
+
+Pour ajouter une info, il suffit d'ajouter une entrée dans `dbsync_queries.lua` (un `SELECT` avec des alias `AS`) : une nouvelle carte apparaît dans le panel, sans toucher à l'API ni au site. Une requête en erreur (table absente…) est ignorée et signalée une fois dans la console. Ne jamais y remonter d'identifiants sensibles (license, IP, Discord).
 
 ## Envoyer des données depuis une autre ressource
 

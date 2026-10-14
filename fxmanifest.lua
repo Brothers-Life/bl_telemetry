@@ -14,6 +14,8 @@ server_scripts {
     'server/main.lua',
     'server/backfill.lua',
     'server/live.lua',
+    'server/dbsync_queries.lua',
+    'server/dbsync.lua',
 }
 
 dependencies {
