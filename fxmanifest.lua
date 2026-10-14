@@ -3,7 +3,7 @@ game 'gta5'
 
 name 'bl_telemetry'
 description 'Telemetrie serveur -> ingest-api (Postgres/Grafana) : events, logs console, snapshots economie/joueurs/vehicules'
-version '1.0.0'
+version '1.1.0'
 
 server_only 'yes'
 
@@ -13,6 +13,9 @@ server_scripts {
     '@oxmysql/lib/MySQL.lua',
     'server/main.lua',
     'server/backfill.lua',
+    'server/live.lua',
+    'server/dbsync_queries.lua',
+    'server/dbsync.lua',
 }
 
 dependencies {
