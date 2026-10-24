@@ -2,8 +2,8 @@ fx_version 'cerulean'
 game 'gta5'
 
 name 'bl_telemetry'
-description 'Telemetrie serveur -> bl-panel-api : events, logs console, snapshots, journaux du jeu, performances'
-version '1.4.0'
+description 'Telemetrie serveur et copie des tables du jeu -> panel Brothers Life'
+version '1.5.0'
 
 use_experimental_fxv2_oal 'yes'
 
@@ -19,6 +19,8 @@ server_scripts {
     'server/dbsync_queries.lua',
     'server/dbsync.lua',
     'server/perf.lua',
+    'server/mirror_tables.lua',
+    'server/mirror.lua',
 }
 
 dependencies {

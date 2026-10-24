@@ -1,6 +1,6 @@
 # bl_telemetry
 
-Ressource FiveM (Qbox) qui envoie la télémétrie du serveur vers **bl-panel-api** (`POST /v1/batch`), affichée dans le panel Brothers Life.
+Ressource FiveM (Qbox) qui envoie la télémétrie du serveur (`POST /v1/batch`) et une copie des tables du jeu (`POST /v1/mirror`) au panel Brothers Life (le bot, depuis sa v2 ; avant, **bl-panel-api**).
 Tout est sortant, par lots, sans jamais bloquer le tick serveur.
 
 ## Installation
@@ -26,6 +26,29 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 | `telemetry_profiler_min` | `30` | Échantillon du profiler FiveM toutes les N minutes (`0` = off) |
 | `telemetry_profiler_frames` | `300` | Durée de chaque échantillon (en images serveur) |
 | `telemetry_society_sql` | — | Requête qui renvoie le total des comptes sociétés (colonne unique). Sans elle, essaie `management_funds` puis `bank_accounts_new` |
+| `telemetry_mirror` | `1` | Copie des tables du jeu vers le panel (`0` = off) |
+| `telemetry_mirror_s` | `60` | Un passage sur toutes les tables copiées toutes les N secondes |
+| `telemetry_mirror_hash_s` | `180` | Tables sans journal ni `ON UPDATE` : relues toutes les N secondes |
+| `telemetry_mirror_keys_s` | `900` | Liste complète des clés (rattrape les suppressions), et nombre de lignes des tables comptées |
+
+## Copie des tables du jeu (`mirror.lua`, page Données FiveM du panel)
+
+Le panel n'a plus besoin d'accéder à MariaDB : `mirror.lua` copie dans sa base les tables listées dans `server/mirror_tables.lua` (fiches joueurs, statistiques, logs du jeu, rôles Discord). La base du jeu reste fermée à Internet.
+
+Seul ce qui a changé part, en arrière-plan, une table après l'autre, jamais dans le tick :
+
+| Table | Ce qui est relu | Exemples |
+| --- | --- | --- |
+| Journal (`log = true`) | Les lignes au-delà du dernier id envoyé, plus les lignes encore ouvertes (`refresh`) | `bank_flows`, `bl_mc_sessions`, logs admin |
+| Colonne `ON UPDATE CURRENT_TIMESTAMP` | Les lignes modifiées depuis le dernier passage | `players`, `ox_inventory` |
+| Petite table (< 3 000 lignes) | La table entière, seulement si son `CHECKSUM` a changé | `management_groups`, `users` |
+| Le reste | Une empreinte CRC32 par ligne (gardée en KVP) : seules les lignes changées ou supprimées partent | `player_vehicles` |
+| `MirrorCounted` | Seulement le nombre de lignes | `ox_doorlock`, `shops` |
+
+- Jamais envoyés : `sky_phone_accounts`, les colonnes `ip`, `tokens`, `password`, `email`, `hwid`, `secret` (et `*_ip`…), les colonnes binaires. Le panel refuse aussi de les stocker.
+- Au redémarrage de la ressource, la copie reprend où elle en était (positions gardées par le panel, empreintes en KVP) : rien n'est renvoyé en entier.
+- Premier envoi : progressif (pages de 1 000 lignes avec une pause), les grosses tables arrivent en quelques minutes.
+- Ajouter une table : une ligne dans `MirrorTables`, la requête qui la lit côté panel, rien d'autre.
 
 ## Ce qui est envoyé automatiquement
 
