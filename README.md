@@ -31,6 +31,25 @@ set telemetry_token "<INGEST_TOKEN de l'API>"
 | `telemetry_mirror_hash_s` | `180` | Tables sans journal ni `ON UPDATE` : relues toutes les N secondes |
 | `telemetry_mirror_keys_s` | `900` | Liste complète des clés (rattrape les suppressions), et nombre de lignes des tables comptées |
 
+## Mise à jour automatique (`update.lua`)
+
+À chaque démarrage de la ressource (redémarrage du serveur ou `restart bl_telemetry`), une seule requête lit la version du `fxmanifest.lua` sur GitHub. Si elle est plus récente, tous les fichiers sont téléchargés (rien n'est écrit si un seul téléchargement échoue), remplacés, puis la ressource redémarre seule. Ensuite, plus rien ne tourne.
+
+```cfg
+# Pour que la ressource puisse se redemarrer seule apres une mise a jour
+add_ace resource.bl_telemetry command.refresh allow
+add_ace resource.bl_telemetry command.restart allow
+```
+
+| Convar | Défaut | Rôle |
+| --- | --- | --- |
+| `telemetry_autoupdate` | `1` | `0` = jamais de mise à jour automatique |
+| `telemetry_update_repo` | `Brothers-Life/bl_telemetry` | Dépôt GitHub suivi |
+| `telemetry_update_branch` | `main` | Branche suivie |
+| `telemetry_update_keep` | — | Fichiers à ne jamais remplacer, séparés par des virgules (ex. `server/dbsync_queries.lua` si tu l'as modifié) |
+
+Une nouvelle version = un `version` plus grand dans `fxmanifest.lua`, poussé sur la branche suivie. Sans les `add_ace`, la mise à jour est installée et la console demande un `restart bl_telemetry`.
+
 ## Copie des tables du jeu (`mirror.lua`, page Données FiveM du panel)
 
 Le panel n'a plus besoin d'accéder à MariaDB : `mirror.lua` copie dans sa base les tables listées dans `server/mirror_tables.lua` (fiches joueurs, statistiques, logs du jeu, rôles Discord). La base du jeu reste fermée à Internet.

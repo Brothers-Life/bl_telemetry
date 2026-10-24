@@ -3,7 +3,7 @@ game 'gta5'
 
 name 'bl_telemetry'
 description 'Telemetrie serveur et copie des tables du jeu -> panel Brothers Life'
-version '1.5.0'
+version '1.5.1'
 
 use_experimental_fxv2_oal 'yes'
 
@@ -13,6 +13,7 @@ client_scripts {
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
+    'server/update.lua',
     'server/main.lua',
     'server/backfill.lua',
     'server/live.lua',
